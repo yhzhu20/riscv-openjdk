@@ -50,7 +50,7 @@ typedef VMRegImpl* VMReg;
 class RegisterImpl;
 typedef RegisterImpl* Register;
 
-inline Register as_Register(int encoding) {
+inline const Register as_Register(int encoding) {
   return (Register)(intptr_t) encoding;
 }
 
@@ -66,7 +66,7 @@ class RegisterImpl: public AbstractRegisterImpl {
   Register successor() const                          { return as_Register(encoding() + 1); }
 
   // construction
-  inline friend Register as_Register(int encoding);
+  inline friend const Register as_Register(int encoding);
 
   VMReg as_VMReg();
 

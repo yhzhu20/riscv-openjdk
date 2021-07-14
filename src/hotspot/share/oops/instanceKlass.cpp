@@ -75,7 +75,6 @@
 #include "prims/methodComparator.hpp"
 #include "runtime/arguments.hpp"
 #include "runtime/atomic.hpp"
-#include "runtime/biasedLocking.hpp"
 #include "runtime/fieldDescriptor.inline.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/javaCalls.hpp"
@@ -508,12 +507,6 @@ InstanceKlass::InstanceKlass(const ClassFileParser& parser, unsigned kind, Klass
   assert(NULL == _methods, "underlying memory not zeroed?");
   assert(is_instance_klass(), "is layout incorrect?");
   assert(size_helper() == parser.layout_size(), "incorrect size_helper?");
-
-  // Set biased locking bit for all instances of this class; it will be
-  // cleared if revocation occurs too often for this type
-  if (UseBiasedLocking && BiasedLocking::enabled()) {
-    set_prototype_header(markWord::biased_locking_prototype());
-  }
 }
 
 void InstanceKlass::deallocate_methods(ClassLoaderData* loader_data,
@@ -683,7 +676,7 @@ void InstanceKlass::deallocate_contents(ClassLoaderData* loader_data) {
   set_annotations(NULL);
 
   if (Arguments::is_dumping_archive()) {
-    SystemDictionaryShared::remove_dumptime_info(this);
+    SystemDictionaryShared::handle_class_unloading(this);
   }
 }
 
@@ -2370,7 +2363,11 @@ void InstanceKlass::metaspace_pointers_do(MetaspaceClosure* it) {
   it->push(&_local_interfaces);
   it->push(&_transitive_interfaces);
   it->push(&_method_ordering);
-  it->push(&_default_vtable_indices);
+  if (!is_rewritten()) {
+    it->push(&_default_vtable_indices, MetaspaceClosure::_writable);
+  } else {
+    it->push(&_default_vtable_indices);
+  }
   it->push(&_fields);
 
   if (itable_length() > 0) {
@@ -2398,9 +2395,9 @@ void InstanceKlass::metaspace_pointers_do(MetaspaceClosure* it) {
 
 void InstanceKlass::remove_unshareable_info() {
 
-  if (has_old_class_version()) {
-    // Set the old class bit.
-    set_is_shared_old_klass();
+  if (can_be_verified_at_dumptime()) {
+    // Remember this so we can avoid walking the hierarchy at runtime.
+    set_verified_at_dump_time();
   }
 
   Klass::remove_unshareable_info();
@@ -2492,6 +2489,7 @@ void InstanceKlass::restore_unshareable_info(ClassLoaderData* loader_data, Handl
   // before the InstanceKlass is added to the SystemDictionary. Make
   // sure the current state is <loaded.
   assert(!is_loaded(), "invalid init state");
+  assert(!shared_loading_failed(), "Must not try to load failed class again");
   set_package(loader_data, pkg_entry, CHECK);
   Klass::restore_unshareable_info(loader_data, protection_domain, CHECK);
 
@@ -2525,15 +2523,9 @@ void InstanceKlass::restore_unshareable_info(ClassLoaderData* loader_data, Handl
     array_klasses()->restore_unshareable_info(ClassLoaderData::the_null_class_loader_data(), Handle(), CHECK);
   }
 
-  // Initialize current biased locking state.
-  if (UseBiasedLocking && BiasedLocking::enabled()) {
-    set_prototype_header(markWord::biased_locking_prototype());
-  }
-
   // Initialize @ValueBased class annotation
   if (DiagnoseSyncOnValueBasedClasses && has_value_based_class_annotation()) {
     set_is_value_based();
-    set_prototype_header(markWord::prototype());
   }
 }
 
@@ -2542,21 +2534,21 @@ void InstanceKlass::restore_unshareable_info(ClassLoaderData* loader_data, Handl
 // without changing the old verifier, the verification constraint cannot be
 // retrieved during dump time.
 // Verification of archived old classes will be performed during run time.
-bool InstanceKlass::has_old_class_version() const {
+bool InstanceKlass::can_be_verified_at_dumptime() const {
   if (major_version() < 50 /*JAVA_6_VERSION*/) {
-    return true;
+    return false;
   }
-  if (java_super() != NULL && java_super()->has_old_class_version()) {
-    return true;
+  if (java_super() != NULL && !java_super()->can_be_verified_at_dumptime()) {
+    return false;
   }
   Array<InstanceKlass*>* interfaces = local_interfaces();
   int len = interfaces->length();
   for (int i = 0; i < len; i++) {
-    if (interfaces->at(i)->has_old_class_version()) {
-      return true;
+    if (!interfaces->at(i)->can_be_verified_at_dumptime()) {
+      return false;
     }
   }
-  return false;
+  return true;
 }
 
 void InstanceKlass::set_shared_class_loader_type(s2 loader_type) {
@@ -2608,7 +2600,7 @@ void InstanceKlass::unload_class(InstanceKlass* ik) {
   ClassLoadingService::notify_class_unloaded(ik);
 
   if (Arguments::is_dumping_archive()) {
-    SystemDictionaryShared::remove_dumptime_info(ik);
+    SystemDictionaryShared::handle_class_unloading(ik);
   }
 
   if (log_is_enabled(Info, class, unload)) {
@@ -2847,9 +2839,9 @@ void InstanceKlass::set_package(ClassLoaderData* loader_data, PackageEntry* pkg_
   }
 }
 
-// Function set_classpath_index checks if the package of the InstanceKlass is in the
-// boot loader's package entry table.  If so, then it sets the classpath_index
-// in the package entry record.
+// Function set_classpath_index ensures that for a non-null _package_entry
+// of the InstanceKlass, the entry is in the boot loader's package entry table.
+// It then sets the classpath_index in the package entry record.
 //
 // The classpath_index field is used to find the entry on the boot loader class
 // path for packages with classes loaded by the boot loader from -Xbootclasspath/a
@@ -3302,8 +3294,6 @@ nmethod* InstanceKlass::lookup_osr_nmethod(const Method* m, int bci, int comp_le
 // -----------------------------------------------------------------------------------------------------
 // Printing
 
-#ifndef PRODUCT
-
 #define BULLET  " - "
 
 static const char* state_names[] = {
@@ -3453,15 +3443,11 @@ void InstanceKlass::print_on(outputStream* st) const {
   st->cr();
 }
 
-#endif //PRODUCT
-
 void InstanceKlass::print_value_on(outputStream* st) const {
   assert(is_klass(), "must be klass");
   if (Verbose || WizardMode)  access_flags().print_on(st);
   name()->print_value_on(st);
 }
-
-#ifndef PRODUCT
 
 void FieldPrinter::do_field(fieldDescriptor* fd) {
   _st->print(BULLET);
@@ -3519,6 +3505,8 @@ void InstanceKlass::oop_print_on(oop obj, outputStream* st) {
     st->cr();
   }
 }
+
+#ifndef PRODUCT
 
 bool InstanceKlass::verify_itable_index(int i) {
   int method_count = klassItable::method_count_for_interface(this);
@@ -3623,7 +3611,7 @@ void InstanceKlass::print_class_load_logging(ClassLoaderData* loader_data,
     } else if (loader_data == ClassLoaderData::the_null_class_loader_data()) {
       Thread* current = Thread::current();
       Klass* caller = current->is_Java_thread() ?
-        current->as_Java_thread()->security_get_caller_class(1):
+        JavaThread::cast(current)->security_get_caller_class(1):
         NULL;
       // caller can be NULL, for example, during a JVMTI VM_Init hook
       if (caller != NULL) {

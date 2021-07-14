@@ -588,20 +588,6 @@ class MacroAssembler: public Assembler {
   void atomic_xchgwu(Register prev, Register newv, Register addr);
   void atomic_xchgalwu(Register prev, Register newv, Register addr);
 
-  // Biased locking support
-  // lock_reg and obj_reg must be loaded up with the appropriate values.
-  // swap_reg is killed.
-  // tmp_reg must be supplied and must not be t0 or t1
-  // Optional slow case is for implementations (interpreter and C1) which branch to
-  // slow case directly. Leaves condition codes set for C2's Fast_Lock node.
-  void biased_locking_enter(Register lock_reg, Register obj_reg,
-                            Register swap_reg, Register tmp_reg,
-                            bool swap_reg_contains_mark,
-                            Label& done, Label* slow_case = NULL,
-                            BiasedLockingCounters* counters = NULL,
-                            Register flag = noreg);
-  void biased_locking_exit(Register obj_reg, Register temp_reg, Label& done, Register flag = noreg);
-
   static bool far_branches() {
     return ReservedCodeCacheSize > branch_range;
   }

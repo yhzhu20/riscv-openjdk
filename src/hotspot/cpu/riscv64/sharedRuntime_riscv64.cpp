@@ -754,6 +754,13 @@ int SharedRuntime::c_calling_convention(const BasicType *sig_bt,
   return stk_args;
 }
 
+int SharedRuntime::vector_calling_convention(VMRegPair *regs,
+                                             uint num_bits,
+                                             uint total_args_passed) {
+  Unimplemented();
+  return 0;
+}
+
 // On 64 bit we will store integer like items to the stack as
 // 64 bits items (riscv64 abi) even though java would only store
 // 32bits for a parameter. On 32bit it will simply be 32 bits
@@ -1683,10 +1690,6 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
     // Load the oop from the handle
     __ ld(obj_reg, Address(oop_handle_reg, 0));
 
-    if (UseBiasedLocking) {
-      __ biased_locking_enter(lock_reg, obj_reg, swap_reg, tmp, false, lock_done, &slow_path_lock);
-    }
-
     // Load (object->mark() | 1) into swap_reg % x10
     __ ld(t0, Address(obj_reg, oopDesc::mark_offset_in_bytes()));
     __ ori(swap_reg, t0, 1);
@@ -1817,11 +1820,6 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
     __ ld(obj_reg, Address(oop_handle_reg, 0));
 
     Label done;
-
-    if (UseBiasedLocking) {
-      __ biased_locking_exit(obj_reg, old_hdr, done);
-    }
-
     // Simple recursive lock?
 
     __ ld(t0, Address(sp, lock_slot_offset * VMRegImpl::stack_slot_size));
